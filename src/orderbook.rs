@@ -1,5 +1,7 @@
+use crate::parser::FromPair;
+
 pub const MAS: usize = 100;
-const MIN: u64 = 200000;
+const MIN: u64 = u64::MAX;
 
 // 1 best level, 2 volume
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +23,7 @@ impl OrderBookCollection {
 
         // Находим в стакане ask элемент, у которого цена совпадает с минимальной,
         // чтобы вернуть структуру Oba (вместе с объемом).
-        if let Some(&found) = self
-            .ask
-            .iter()
-            .find(|v| v.0[0] == min_price && *v != &Oba([0, 0]))
-        {
+        if let Some(&found) = self.ask.iter().find(|v| v.0[0] == min_price && *v != &Oba([0, 0])) {
             self.pa = found;
         }
         self.pa
@@ -35,11 +33,7 @@ impl OrderBookCollection {
     pub fn pb(&mut self) -> Oba {
         let max_price = find_max(&self.bid);
 
-        if let Some(&found) = self
-            .bid
-            .iter()
-            .find(|v| v.0[0] == max_price && *v != &Oba([0, 0]))
-        {
+        if let Some(&found) = self.bid.iter().find(|v| v.0[0] == max_price && *v != &Oba([0, 0])) {
             self.pb = found;
         }
         self.pb
@@ -55,6 +49,26 @@ impl OrderBookCollection {
         } else {
             0
         }
+    }
+}
+
+impl FromPair for Oba {
+    fn from_pair(first: &str, second: &str) -> Option<Self> {
+        // Вариант А: Если биржа присылает строки, которые нужно перевести в fixed-point (целые числа)
+        // Умножаем на 10^8 (или ваш коэффициент точности)
+        let price_f = first.parse::<f64>().ok()?;
+        let qty_f = second.parse::<f64>().ok()?;
+
+        let price_u64 = (price_f * 100_000_000.0) as u64;
+        let qty_u64 = (qty_f * 100_000_000.0) as u64;
+
+        /* 
+        // Вариант Б: Если данные И ТАК приходят в целых числах без точек:
+        let price_u64 = first.parse::<u64>().ok()?;
+        let qty_u64 = second.parse::<u64>().ok()?;
+        */
+
+        Some(Oba([price_u64, qty_u64]))
     }
 }
 
