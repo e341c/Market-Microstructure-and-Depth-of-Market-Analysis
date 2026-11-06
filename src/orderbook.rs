@@ -19,7 +19,6 @@ impl OrderBookCollection {
     // Метод находит минимальный ask и возвращает Oba целиком
     pub fn pa(&mut self) -> Oba {
         let min_price = find_min(&self.ask);
-        println!("{}", min_price);
 
         // Находим в стакане ask элемент, у которого цена совпадает с минимальной,
         // чтобы вернуть структуру Oba (вместе с объемом).
@@ -50,6 +49,49 @@ impl OrderBookCollection {
             0
         }
     }
+
+    // Find Microprice = (Pa·Vb + Pb·Va) / (Vb + Va).
+    pub fn microprice(&mut self) -> u64 {
+        // Сначала вызываем pa() и pb(), чтобы гарантировать, что внутри self.pa и self.pb лежат актуальные лучшие цены
+        let pa_price = self.pa().0[0] as u128;
+        let pa_vol = self.pa.0[1] as u128;
+        let pb_price = self.pb().0[0] as u128;
+        let pb_vol = self.pb.0[1] as u128;
+
+        let total_volume = pb_vol + pa_vol;
+
+        // Защита от деления на ноль, если стакан оказался пуст
+        if total_volume == 0 {
+            return 0;
+        }
+
+        // Вычисления в u128 защищают от целочисленного переполнения
+        let numerator = pa_price * pb_vol + pb_price * pa_vol;
+
+        (numerator / total_volume) as u64
+    }
+
+    // Find OBI (Order Flow Imbalance) (дисбаланс стакана) = (Vb − Va) / (Vb + Va), от −1 до +1.
+    pub fn obi(&mut self) -> i32 {
+        // Гарантируем актуальность данных лучших уровней
+        let _ = self.pa();
+        let _ = self.pb();
+
+        let va = self.pa.0[1] as i128; // Объем ask
+        let vb = self.pb.0[1] as i128; // Объем bid
+
+        let total_volume = vb + va;
+
+        if total_volume == 0 {
+            return 0;
+        }
+
+        // Масштабируем числитель на 10_000 для сохранения 4 знаков после запятой в fixed-point
+        let scale = 10_000;
+        let numerator = (vb - va) * scale;
+
+        (numerator / total_volume) as i32
+    }
 }
 
 impl FromPair for Oba {
@@ -62,7 +104,7 @@ impl FromPair for Oba {
         let price_u64 = (price_f * 100_000_000.0) as u64;
         let qty_u64 = (qty_f * 100_000_000.0) as u64;
 
-        /* 
+        /*
         // Вариант Б: Если данные И ТАК приходят в целых числах без точек:
         let price_u64 = first.parse::<u64>().ok()?;
         let qty_u64 = second.parse::<u64>().ok()?;

@@ -2,28 +2,36 @@ mod orderbook;
 use orderbook::{ Oba, OrderBookCollection, MAS };
 
 pub mod config;
-use config::{ get_config };
+use config::get_config;
 
 pub mod fetchdata;
-use fetchdata::{ fetchdata };
+use fetchdata::fetchdata;
 
 pub mod parser;
-use parser::{ ExtractedData, parse_segmented_payload };
+use parser::{ parse_segmented_payload, ExtractedData };
+
+mod ws {
+    pub mod client;
+}
+// use ws::{ connect };
 
 // NEXT STEPS:
-// Get config
-// Fetch data for api
-// Create order book collection based on that data
-// Find Pa and Pb for order book collection
-// Find OBI (Order Flow Imbalance) (дисбаланс стакана) = (Vb − Va) / (Vb + Va), от −1 до +1.
-// Find Microprice = (Pa·Vb + Pb·Va) / (Vb + Va).
+// Get config +
+// Fetch data for api +
+// Create order book collection based on that data +
+// Find Pa and Pb for order book collection +
+// Find OBI (Order Flow Imbalance) (дисбаланс стакана) = (Vb − Va) / (Vb + Va), от −1 до +1. +
+// Find Microprice = (Pa·Vb + Pb·Va) / (Vb + Va). +
+// Integrate Wensocket data fetching and calculating OBI and microprice from ws data
+// Create optimization app state that will wait until we get stable connection with websocket and request time is in predifiend range, this will help us not create orders if api or ws have troubles with the speed
+// Optimize speed for request and parsing data
+// Optimize speed for calculating OBI and microprice
 // Find Market Memory and Iceberg
 // Set Model for ML
 // Квантование стакана ?
 // Адверс-селекция и VPIN
 fn main() {
     let config = get_config();
-    println!("{}", config.binance_url);
     let raw_json = fetchdata(config).expect("failed to fetch data");
 
     let result: Option<ExtractedData<Oba>> = parse_segmented_payload(
@@ -32,9 +40,6 @@ fn main() {
         "bids",
         "asks"
     );
-
-    // Исправлено: используем {:?}, так как у ExtractedData есть только #[derive(Debug)]
-    println!("{:?}", result);
 
     let empty_order = Oba([0, 0]);
 
@@ -60,8 +65,7 @@ fn main() {
         }
 
         // Теперь ваш стакан `book` полностью заполнен данными из сети!
-        // Можно вызывать ваши методы расчета спреда:
-        println!("Spread: {}", book.spread());
+        // Можно вызывать ваши методы расчета спреда
     } else {
         eprintln!("Failed to parse orderbook segments from JSON");
     }
@@ -83,6 +87,9 @@ fn main() {
     // 6. Считаем спред
     let current_spread = book.spread();
 
+    let microprice = book.microprice();
+    let obi = book.obi();
+
     // 7. Выводим результаты в консоль
     println!("--- Данные стакана ордеров ---");
     println!("Лучший Ask (pa): цена = {}, объем = {}", best_ask.0[0], best_ask.0[1]);
@@ -93,4 +100,9 @@ fn main() {
     println!("\nПроверка внутренних полей структуры:");
     println!("book.pa: {:?}", book.pa);
     println!("book.pb: {:?}", book.pb);
+
+    println!("\nbook.micropice: {}", microprice);
+    println!("\nbook.obi: {}", obi);
+
+    ws::client::run_client(&config.binance_ws_url);
 }

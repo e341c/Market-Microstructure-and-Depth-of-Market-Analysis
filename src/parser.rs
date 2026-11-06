@@ -1,3 +1,4 @@
+// Parse from JSON
 pub trait FromPair: Sized {
     fn from_pair(first: &str, second: &str) -> Option<Self>;
 }
@@ -16,8 +17,7 @@ pub fn parse_segmented_payload<T>(
     second_section_key: &str
 ) -> Option<ExtractedData<T>>
     where
-        T: FromPair
-        // F: FnMut(u64, Vec<(String, String)>, Vec<(String, String)>)
+        T: FromPair // F: FnMut(u64, Vec<(String, String)>, Vec<(String, String)>)
 {
     let first_idx = json.find(first_section_key)?;
     let second_idx = json.find(second_section_key)?;
@@ -61,4 +61,77 @@ pub fn parse_segmented_payload<T>(
         primary_list: map_section(first_section),
         secondary_list: map_section(second_section),
     })
+}
+
+// Convert to JSON
+#[macro_export]
+macro_rules! json {
+    // 1. Правило для обработки вложенных объектов { key: val, ... }
+    ({ $($key:tt: $val:tt),* $(,)? }) => {
+        {
+            let mut s = String::new();
+            s.push('{');
+            let mut first = true;
+            $(
+                if !first {
+                    s.push(',');
+                }
+                first = false;
+                
+                // Добавляем ключ в кавычках и двоеточие
+                s.push_str(&format!("\"{}\":", stringify!($key)));
+                
+                // Рекурсивно вызываем макрос для обработки значения
+                s.push_str(&$crate::json!($val));
+            )*
+            s.push('}');
+            s
+        }
+    };
+
+    // 2. Правило для обычных выражений (строки, числа, переменные, bool)
+    ($val:expr) => {
+        // Мы используем специальный внутренний трейт для правильного форматирования типов
+        $crate::JsonStringify::stringify_val(&$val)
+    };
+}
+
+// Вспомогательный трейт для автоматического добавления кавычек строкам
+// и сохранения чисел/bool в исходном виде
+pub trait JsonStringify {
+    fn stringify_val(&self) -> String;
+}
+
+// Для строк и ссылок на строки автоматически добавляем экранированные кавычки
+impl JsonStringify for &str {
+    fn stringify_val(&self) -> String {
+        format!("\"{}\"", self)
+    }
+}
+impl JsonStringify for String {
+    fn stringify_val(&self) -> String {
+        format!("\"{}\"", self)
+    }
+}
+
+// Для чисел и логических типов выводим "как есть" (без кавычек)
+impl JsonStringify for i32 {
+    fn stringify_val(&self) -> String {
+        self.to_string()
+    }
+}
+impl JsonStringify for u32 {
+    fn stringify_val(&self) -> String {
+        self.to_string()
+    }
+}
+impl JsonStringify for f64 {
+    fn stringify_val(&self) -> String {
+        self.to_string()
+    }
+}
+impl JsonStringify for bool {
+    fn stringify_val(&self) -> String {
+        self.to_string()
+    }
 }

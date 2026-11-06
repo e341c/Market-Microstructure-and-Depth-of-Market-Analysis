@@ -1,11 +1,14 @@
+use dotenv::dotenv;
 use envconfig::Envconfig;
 use std::sync::OnceLock;
-use dotenv::dotenv;
 
 #[derive(Envconfig, Clone)]
 pub struct Config {
     #[envconfig(from = "BINANCE_URL")]
     pub binance_url: String,
+
+    #[envconfig(from = "BINANCE_WS_URL")]
+    pub binance_ws_url: String,
 }
 
 pub static CONFIG: OnceLock<Config> = OnceLock::new();
