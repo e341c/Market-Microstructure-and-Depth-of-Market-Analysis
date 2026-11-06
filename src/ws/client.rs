@@ -1,10 +1,16 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
+use rand::RngExt;
 use rustls::{ClientConfig, RootCertStore, Stream};
 use rustls_pki_types::ServerName;
 use sha1::{Digest, Sha1};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::orderbook::{MAS, Oba, OrderBookCollection};
+use crate::parser::{ExtractedData, parse_segmented_payload};
+use crate::simulator::{self, HftSimulator};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -58,10 +64,26 @@ pub fn run_client(url: &String) {
     send_handshake(&mut stream, domain, path, &ws_key);
     verify_handshake(&mut stream, &ws_key);
 
+    let mut simulator = simulator::HftSimulator::new(100_000_000);
+
+    // ПРИМЕР ОТПРАВКИ СООБЩЕНИЯ ДЛЯ BINANCE:
+    // Если вы изначально подключились просто к "wss://://binance.com",
+    // вы можете динамически подписаться на любые стримы, отправив JSON:
+    let subscribe_message = r#"{
+        "method": "SUBSCRIBE",
+        "params": [
+            "btcusdt@depth20@100ms"
+        ],
+        "id": 1
+    }"#;
+
+    println!("Отправляем запрос на подписку...");
+    send_text_frame(&mut stream, subscribe_message);
+
     // 5. Читаем стрим от Binance
     println!("Ожидание данных от Binance...");
     loop {
-        read_server_frame(&mut stream);
+        read_server_frame(&mut stream, &mut simulator);
     }
 }
 
@@ -112,9 +134,9 @@ fn verify_handshake<S: Read>(stream: &mut S, ws_key: &str) {
     }
 }
 
-// Изменим чтение, чтобы оно могло обрабатывать фреймы больше 125 байт,
-// так как маркет-дата от Binance всегда большая
-fn read_server_frame<S: Read>(stream: &mut S) {
+fn read_server_frame<S: Read + Write>(stream: &mut S, simulator: &mut HftSimulator) {
+    // УДАЛЯЕМ замер отсюда (он считал время ожидания сети)
+
     let mut header = [0; 2];
     if stream.read_exact(&mut header).is_err() {
         return;
@@ -122,7 +144,6 @@ fn read_server_frame<S: Read>(stream: &mut S) {
 
     let byte1 = header[0];
     let byte2 = header[1];
-
     let opcode = byte1 & 0x0f;
     let mut payload_len = (byte2 & 0x7f) as usize;
 
@@ -131,7 +152,6 @@ fn read_server_frame<S: Read>(stream: &mut S) {
         std::process::exit(0);
     }
 
-    // Обработка расширенной длины фреймов (Binance шлет крупные JSON)
     if payload_len == 126 {
         let mut ext_len = [0; 2];
         stream.read_exact(&mut ext_len).unwrap();
@@ -144,21 +164,150 @@ fn read_server_frame<S: Read>(stream: &mut S) {
 
     let mut payload = vec![0; payload_len];
     if stream.read_exact(&mut payload).is_ok() {
-        if opcode == 0x01 {
-            // Текст
-            if let Ok(text) = String::from_utf8(payload) {
-                println!("Данные: {}", text);
+        // СЮДА ПЕРЕНОСИМ ЗАМЕР: Данные физически у нас в памяти (в vec),
+        // сеть больше не блокирует выполнение. Начинается чистая обработка!
+        let packet_received_at = std::time::Instant::now();
+
+        match opcode {
+            0x01 => {
+                if let Ok(text) = String::from_utf8(payload) {
+                    let result: Option<ExtractedData<Oba>> =
+                        parse_segmented_payload(&text, "lastUpdateId", "bids", "asks");
+
+                    let empty_order = Oba([0, 0]);
+                    let mut book = OrderBookCollection {
+                        last_update_id: 0,
+                        bid: [empty_order; MAS],
+                        ask: [empty_order; MAS],
+                        pa: empty_order,
+                        pb: empty_order,
+                    };
+
+                    if let Some(extracted_data) = result {
+                        book.last_update_id = extracted_data.id;
+                        for (i, item) in extracted_data
+                            .primary_list
+                            .into_iter()
+                            .take(MAS)
+                            .enumerate()
+                        {
+                            book.bid[i] = item;
+                        }
+                        for (i, item) in extracted_data
+                            .secondary_list
+                            .into_iter()
+                            .take(MAS)
+                            .enumerate()
+                        {
+                            book.ask[i] = item;
+                        }
+                    } else {
+                        eprintln!("Failed to parse orderbook segments from JSON");
+                    }
+
+                    let best_ask = book.pa();
+                    let best_bid = book.pb();
+                    let microprice = book.microprice();
+                    let obi = book.obi();
+
+                    // Передаем одинаковый Instant, так как замеряем чистую скорость выполнения кода
+                    simulator.update_market_state(
+                        book.last_update_id,
+                        microprice,
+                        obi,
+                        best_ask.0[0],
+                        best_bid.0[0],
+                        packet_received_at, // Измеряет: Парсинг JSON + расчет метрик + симулятор
+                    );
+                }
             }
-        } else if opcode == 0x9 {
-            // Ping от сервера
-            println!("Получен Ping от Binance");
-            // В идеале тут нужно отправить обратно Pong (opcode 0xA)
+            0x9 => {
+                println!("Получен Ping от Binance");
+                send_pong(stream, &payload);
+            }
+            _ => {}
         }
     }
+}
+
+// Отправка текстового фрейма ТЕПЕРЬ ПОДДЕРЖИВАЕТ ЛЮБУЮ ДЛИНУ (даже > 125 байт)
+// так как JSON-запросы подписки могут быть длинными
+fn send_text_frame<S: Write>(stream: &mut S, text: &str) {
+    let payload = text.as_bytes();
+    let payload_len = payload.len();
+    let mut frame = Vec::new();
+
+    // 1-й байт: FIN = 1 + Opcode = 1 (Текст) -> 0x81
+    frame.push(0x81);
+
+    // 2-й байт и далее: Кодируем длину согласно RFC 6455
+    if payload_len <= 125 {
+        // Длина помещается в 7 бит, не забываем включить бит маски (0x80)
+        frame.push(0x80 | (payload_len as u8));
+    } else if payload_len <= 65535 {
+        // Длина помещается в 16 бит
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    } else {
+        // Длина помещается в 64 бита
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
+    }
+
+    // Генерируем маску (обязательно для клиента)
+    let mut rng = rand::rng();
+    let mask: [u8; 4] = rng.random();
+    frame.extend_from_slice(&mask);
+
+    // XOR-маскирование данных
+    for (i, &byte) in payload.iter().enumerate() {
+        frame.push(byte ^ mask[i % 4]);
+    }
+
+    stream.write_all(&frame).unwrap();
+    stream.flush().unwrap();
+    println!("-> Отправлено сообщение на сервер");
+}
+
+// Отправка Pong фрейма (обязательно маскированного!) в ответ на Ping
+fn send_pong<S: Write>(stream: &mut S, ping_payload: &[u8]) {
+    let mut frame = Vec::new();
+
+    // 1-й байт: FIN = 1 + Opcode = 0xA (Pong) -> 0x8A
+    frame.push(0x8A);
+
+    // Пинг-понг фреймы обычно маленькие (до 125 байт)
+    frame.push(0x80 | (ping_payload.len() as u8));
+
+    let mut rng = rand::rng();
+    let mask: [u8; 4] = rng.random();
+    frame.extend_from_slice(&mask);
+
+    for (i, &byte) in ping_payload.iter().enumerate() {
+        frame.push(byte ^ mask[i % 4]);
+    }
+
+    stream.write_all(&frame).unwrap();
+    stream.flush().unwrap();
+    println!("-> Отправлен Pong в ответ на Ping от сервера.");
 }
 
 fn generate_nonce() -> String {
     let mut nonce = [0u8; 16];
     rand::fill(&mut nonce);
     BASE64_STANDARD.encode(nonce)
+}
+
+fn get_full_timestamp() -> String {
+    let now = SystemTime::now();
+    let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
+    let secs = since_the_epoch.as_secs();
+    let millis = since_the_epoch.subsec_millis();
+
+    // Упрощенный перевод Unix-времени в формат ЧЧ:ММ:СС (по UTC для HFT)
+    let hour = (secs % 86400) / 3600;
+    let minute = (secs % 3600) / 60;
+    let second = secs % 60;
+
+    format!("{:02}:{:02}:{:02}.{:03}", hour, minute, second, millis)
 }

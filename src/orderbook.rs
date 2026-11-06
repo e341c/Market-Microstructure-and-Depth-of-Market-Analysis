@@ -9,6 +9,7 @@ pub struct Oba(pub [u64; 2]);
 
 // For speed will be used lamports math, no float
 pub struct OrderBookCollection {
+    pub last_update_id: u64,
     pub bid: [Oba; MAS],
     pub ask: [Oba; MAS],
     pub pa: Oba,
