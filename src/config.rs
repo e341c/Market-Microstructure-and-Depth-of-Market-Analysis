@@ -9,6 +9,24 @@ pub struct Config {
 
     #[envconfig(from = "BINANCE_WS_URL")]
     pub binance_ws_url: String,
+
+    #[envconfig(from = "ADDR")]
+    pub addr: String,
+
+    #[envconfig(from = "API_KEY")]
+    pub api_key: String,
+
+    #[envconfig(from = "PEM_PATH")]
+    pub pem_path: String,
+
+    #[envconfig(from = "SYMBOL")]
+    pub symbol: String,
+
+    #[envconfig(from = "DEPTH")]
+    pub depth: u32,
+
+    #[envconfig(from = "HEARTBEAT_SECS")]
+    pub heartbeat_secs: u32,
 }
 
 pub static CONFIG: OnceLock<Config> = OnceLock::new();

@@ -1,2 +1,5 @@
 /target
 .env
+/pem
+stunnel.conf
+*.log

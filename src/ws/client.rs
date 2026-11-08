@@ -3,14 +3,18 @@ use rand::RngExt;
 use rustls::{ClientConfig, RootCertStore, Stream};
 use rustls_pki_types::ServerName;
 use sha1::{Digest, Sha1};
+use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::orderbook::{MAS, Oba, OrderBookCollection};
-use crate::parser::{ExtractedData, parse_segmented_payload};
-use crate::simulator::{self, HftSimulator};
+use crate::book::{Book, Oba, Top};
+use crate::fixed::fmt_fixed;
+use crate::parser::parse_segmented_payload;
+use crate::timeutil::utc_timestamp;
+use crate::{file, metrics};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -64,8 +68,6 @@ pub fn run_client(url: &String) {
     send_handshake(&mut stream, domain, path, &ws_key);
     verify_handshake(&mut stream, &ws_key);
 
-    let mut simulator = simulator::HftSimulator::new(100_000_000);
-
     // ПРИМЕР ОТПРАВКИ СООБЩЕНИЯ ДЛЯ BINANCE:
     // Если вы изначально подключились просто к "wss://://binance.com",
     // вы можете динамически подписаться на любые стримы, отправив JSON:
@@ -80,10 +82,31 @@ pub fn run_client(url: &String) {
     println!("Отправляем запрос на подписку...");
     send_text_frame(&mut stream, subscribe_message);
 
+    // file writing
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("metrics.log")
+        .expect("cannot create file");
+
     // 5. Читаем стрим от Binance
     println!("Ожидание данных от Binance...");
+    let mut book = Book::default();
+    let mut prev_top: Option<Top> = None;
+    // let mut ofi_arr = Vec::new();
+    // let mut obi_arr = Vec::new();
+
+    let mut ofi_window: VecDeque<(Instant, i128)> = VecDeque::new();
+    let mut obi_window: VecDeque<(Instant, i32)> = VecDeque::new();
     loop {
-        read_server_frame(&mut stream, &mut simulator);
+        read_server_frame(
+            &mut stream,
+            &mut file,
+            &mut book,
+            &mut prev_top,
+            &mut ofi_window,
+            &mut obi_window,
+        );
     }
 }
 
@@ -134,9 +157,14 @@ fn verify_handshake<S: Read>(stream: &mut S, ws_key: &str) {
     }
 }
 
-fn read_server_frame<S: Read + Write>(stream: &mut S, simulator: &mut HftSimulator) {
-    // УДАЛЯЕМ замер отсюда (он считал время ожидания сети)
-
+fn read_server_frame<S: Read + Write>(
+    stream: &mut S,
+    file: &mut File,
+    book: &mut Book,
+    prev_top: &mut Option<Top>,
+    ofi_window: &mut VecDeque<(Instant, i128)>,
+    obi_window: &mut VecDeque<(Instant, i32)>,
+) {
     let mut header = [0; 2];
     if stream.read_exact(&mut header).is_err() {
         return;
@@ -164,61 +192,84 @@ fn read_server_frame<S: Read + Write>(stream: &mut S, simulator: &mut HftSimulat
 
     let mut payload = vec![0; payload_len];
     if stream.read_exact(&mut payload).is_ok() {
-        // СЮДА ПЕРЕНОСИМ ЗАМЕР: Данные физически у нас в памяти (в vec),
-        // сеть больше не блокирует выполнение. Начинается чистая обработка!
-        let packet_received_at = std::time::Instant::now();
+        let received = Instant::now();
 
         match opcode {
             0x01 => {
                 if let Ok(text) = String::from_utf8(payload) {
-                    let result: Option<ExtractedData<Oba>> =
-                        parse_segmented_payload(&text, "lastUpdateId", "bids", "asks");
+                    if let Some(data) =
+                        parse_segmented_payload::<Oba>(&text, "lastUpdateId", "bids", "asks")
+                    {
+                        book.apply_levels(&data.primary_list, &data.secondary_list);
+                        if let Some(top) = book.top() {
+                            // let p_top = prev_books.last().and_then(Option::as_ref).unwrap_or(&top);
+                            let p_top = prev_top.as_ref().unwrap_or(&top);
+                            let microprice = metrics::microprice(&top) as u128;
 
-                    let empty_order = Oba([0, 0]);
-                    let mut book = OrderBookCollection {
-                        last_update_id: 0,
-                        bid: [empty_order; MAS],
-                        ask: [empty_order; MAS],
-                        pa: empty_order,
-                        pb: empty_order,
-                    };
+                            // OBI calc logic
+                            let obi = metrics::obi(&top) as i32;
+                            obi_window.push_back((received, obi));
 
-                    if let Some(extracted_data) = result {
-                        book.last_update_id = extracted_data.id;
-                        for (i, item) in extracted_data
-                            .primary_list
-                            .into_iter()
-                            .take(MAS)
-                            .enumerate()
-                        {
-                            book.bid[i] = item;
+                            while let Some((timestamp, _)) = obi_window.front() {
+                                if received.duration_since(*timestamp) >= Duration::from_secs(1) {
+                                    obi_window.pop_front();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            let obi1s: i32 = if obi_window.is_empty() {
+                                0
+                            } else {
+                                (obi_window
+                                    .iter()
+                                    .map(|(_, value)| *value as i64)
+                                    .sum::<i64>()
+                                    / obi_window.len() as i64)
+                                    as i32
+                            };
+
+                            // OFI calc logic
+                            let ofi = metrics::ofi(&top, p_top);
+
+                            // Добавляем текущее значение
+                            ofi_window.push_back((received, ofi));
+
+                            // Удаляем события старше 500 ms
+                            while let Some((timestamp, _)) = ofi_window.front() {
+                                if received.duration_since(*timestamp) >= Duration::from_millis(500)
+                                {
+                                    ofi_window.pop_front();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            // Суммируем текущие события в окне
+                            let ofi500: i128 = ofi_window.iter().map(|(_, value)| *value).sum();
+
+                            let latency = received.elapsed().as_micros();
+
+                            // log is timestamp, data id, best ask, best bid, obi, ofi, microprice, duration in µs
+                            let log = format!(
+                                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{};",
+                                latency,
+                                utc_timestamp(),
+                                data.id,
+                                fmt_fixed(top.pa.price()),
+                                fmt_fixed(top.pb.price()),
+                                fmt_fixed(microprice),
+                                obi,
+                                obi1s,
+                                ofi,
+                                ofi500,
+                            );
+                            writeln!(file, "{}", log).expect("cannot write log");
+                            // sim.update_market_state(data.id, &top, received);
+                            // prev_books.push(Some(top.clone()));
+                            *prev_top = Some(top.clone());
                         }
-                        for (i, item) in extracted_data
-                            .secondary_list
-                            .into_iter()
-                            .take(MAS)
-                            .enumerate()
-                        {
-                            book.ask[i] = item;
-                        }
-                    } else {
-                        eprintln!("Failed to parse orderbook segments from JSON");
                     }
-
-                    let best_ask = book.pa();
-                    let best_bid = book.pb();
-                    let microprice = book.microprice();
-                    let obi = book.obi();
-
-                    // Передаем одинаковый Instant, так как замеряем чистую скорость выполнения кода
-                    simulator.update_market_state(
-                        book.last_update_id,
-                        microprice,
-                        obi,
-                        best_ask.0[0],
-                        best_bid.0[0],
-                        packet_received_at, // Измеряет: Парсинг JSON + расчет метрик + симулятор
-                    );
                 }
             }
             0x9 => {
