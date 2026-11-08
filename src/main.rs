@@ -1,3 +1,4 @@
+mod analyse;
 mod auth;
 mod book;
 mod config;
@@ -33,50 +34,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_sent = Instant::now();
     let hb_interval = Duration::from_secs(cfg.heartbeat_secs.saturating_sub(5).max(1) as u64);
 
-    ws::client::run_client(&cfg.binance_ws_url);
+    let metrics = analyse::analyse::analyse(&cfg.metrics_file_path);
 
-    loop {
-        if !session.read_some()? {
-            eprintln!("server closed connection");
-            break;
-        }
+    // ws::client::run_client(&cfg.binance_ws_url);
 
-        while let Some(msg) = session.next_msg() {
-            match get(&msg, 35).unwrap_or("") {
-                "A" => {
-                    println!("logged on");
-                    if !subscribed {
-                        session.subscribe(&cfg.symbol, cfg.depth)?;
-                        subscribed = true;
-                    }
-                }
-                "1" => {
-                    let id = get(&msg, 112).unwrap_or("").to_string();
-                    session.send("0", &[(112, id)])?;
-                    last_sent = Instant::now();
-                }
-                mt @ ("W" | "X") => {
-                    let received = Instant::now();
-                    book.apply(&msg, mt == "W");
-                    let Some(seq) = get(&msg, 34).and_then(|s| s.parse::<u64>().ok()) else {
-                        continue;
-                    };
-                    if let Some(top) = book.top() {
-                        sim.update_market_state(seq, &top, received);
-                    }
-                }
-                "3" | "j" | "5" => {
-                    eprintln!("reject/logout: {:?}", msg);
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
+    // loop {
+    //     if !session.read_some()? {
+    //         eprintln!("server closed connection");
+    //         break;
+    //     }
 
-        if last_sent.elapsed() >= hb_interval {
-            session.send("0", &[])?;
-            last_sent = Instant::now();
-        }
-    }
+    //     while let Some(msg) = session.next_msg() {
+    //         match get(&msg, 35).unwrap_or("") {
+    //             "A" => {
+    //                 println!("logged on");
+    //                 if !subscribed {
+    //                     session.subscribe(&cfg.symbol, cfg.depth)?;
+    //                     subscribed = true;
+    //                 }
+    //             }
+    //             "1" => {
+    //                 let id = get(&msg, 112).unwrap_or("").to_string();
+    //                 session.send("0", &[(112, id)])?;
+    //                 last_sent = Instant::now();
+    //             }
+    //             mt @ ("W" | "X") => {
+    //                 let received = Instant::now();
+    //                 book.apply(&msg, mt == "W");
+    //                 let Some(seq) = get(&msg, 34).and_then(|s| s.parse::<u64>().ok()) else {
+    //                     continue;
+    //                 };
+    //                 if let Some(top) = book.top() {
+    //                     sim.update_market_state(seq, &top, received);
+    //                 }
+    //             }
+    //             "3" | "j" | "5" => {
+    //                 eprintln!("reject/logout: {:?}", msg);
+    //                 return Ok(());
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+
+    //     if last_sent.elapsed() >= hb_interval {
+    //         session.send("0", &[])?;
+    //         last_sent = Instant::now();
+    //     }
+    // }
     Ok(())
 }

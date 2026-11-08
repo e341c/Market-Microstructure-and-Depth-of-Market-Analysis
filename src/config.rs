@@ -4,6 +4,12 @@ use std::sync::OnceLock;
 
 #[derive(Envconfig, Clone)]
 pub struct Config {
+    #[envconfig(from = "DEPTH")]
+    pub depth: u32,
+
+    #[envconfig(from = "HEARTBEAT_SECS")]
+    pub heartbeat_secs: u32,
+
     #[envconfig(from = "BINANCE_URL")]
     pub binance_url: String,
 
@@ -22,11 +28,8 @@ pub struct Config {
     #[envconfig(from = "SYMBOL")]
     pub symbol: String,
 
-    #[envconfig(from = "DEPTH")]
-    pub depth: u32,
-
-    #[envconfig(from = "HEARTBEAT_SECS")]
-    pub heartbeat_secs: u32,
+    #[envconfig(from = "METRICS_FILE_PATH")]
+    pub metrics_file_path: String,
 }
 
 pub static CONFIG: OnceLock<Config> = OnceLock::new();
