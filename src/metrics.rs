@@ -59,11 +59,11 @@ pub fn ofi(current: &Top, prev: &Top) -> i128 {
 
     // 2. Считаем ΔAsk (изменение на стороне предложения)
     let delta_ask = if p_ask_cur < p_ask_prev {
-        -v_ask_cur
+        v_ask_cur
     } else if p_ask_cur == p_ask_prev {
         v_ask_cur - v_ask_prev
     } else {
-        v_ask_prev
+        -v_ask_prev
     };
 
     // OFI = ΔBid - ΔAsk

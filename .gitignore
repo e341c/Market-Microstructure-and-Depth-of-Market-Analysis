@@ -3,3 +3,7 @@
 /pem
 stunnel.conf
 *.log
+/metrics
+/plot
+/tmp
+.DS_store
