@@ -2,6 +2,7 @@ mod log_parser;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+mod random;
 
 // Потенциально сильный сигнал вверх:
 // - OBI положительный и растёт.
@@ -22,6 +23,10 @@ use std::io::{BufWriter, Write};
 // MFE (Maximum Favorable Excursion) — максимальное движение в нашу пользу после входа.
 // MAE (Maximum Adverse Excursion)   — максимальное движение против нашей позиции после входа.
 
+// Комиссия в б.п. на одну сторону (вход или выход). 10 б.п. = 0.1%.
+// Отрицательное значение = ребейт.
+const FEE_BPS_PER_SIDE: [f64; 5] = [10.0, 5.0, 2.0, 0.0, -1.0];
+
 #[derive(Debug, Clone, Copy)]
 struct ExcursionStats {
     entry_price: f64,
@@ -38,6 +43,9 @@ struct ExcursionStats {
     final_return: f64,
     final_index: usize,
 
+    first_target_return: Option<f64>,
+    first_stop_return: Option<f64>,
+
     first_target_index: Option<usize>,
     first_stop_index: Option<usize>,
     // Время от входа до первого достижения цели / стопа.
@@ -52,6 +60,7 @@ struct Signal {
     polarity: Polarity,
     validity: Validity,
     timeout_us: i64,
+    delay_us: i64,
     stats: Option<ExcursionStats>,
 }
 
@@ -179,7 +188,7 @@ impl ExcursionSummary {
     }
 }
 
-pub fn analyse(n: &str, target_move: f64, stop_move: f64, timeout_ms: u64) {
+pub fn analyse(n: &str, target_move: f64, stop_move: f64, timeout_ms: u64, entry_delay_ms: i64) {
     let log = log_parser::read_log_file(n).expect("[ERROR] parse log file failed");
     let data = &log.data;
     let ts = &log.ts_us;
@@ -199,6 +208,7 @@ pub fn analyse(n: &str, target_move: f64, stop_move: f64, timeout_ms: u64) {
             weight,
             polarity,
             timeout_us,
+            delay_us: entry_delay_ms * 1000,
             validity: Validity::Unverified,
             stats: None,
         };
@@ -248,7 +258,8 @@ pub fn analyse(n: &str, target_move: f64, stop_move: f64, timeout_ms: u64) {
     writeln!(out, "\n========== SIGNAL ANALYSIS ==========").unwrap();
     writeln!(out, "Target:           {}", target_move).unwrap();
     writeln!(out, "Stop:             {}", stop_move).unwrap();
-    writeln!(out, "timeout:          {}", timeout_ms).unwrap();
+    writeln!(out, "Timeout:          {}", timeout_ms).unwrap();
+    writeln!(out, "Delay:            {}", entry_delay_ms).unwrap();
     writeln!(out, "Positive valid:   {}", positive_valid).unwrap();
     writeln!(out, "Positive invalid: {}", positive_invalid).unwrap();
     writeln!(out, "Negative valid:   {}", negative_valid).unwrap();
@@ -260,7 +271,12 @@ pub fn analyse(n: &str, target_move: f64, stop_move: f64, timeout_ms: u64) {
     print_excursion_summary(&mut out, "NEGATIVE", &mut negative_summary);
     print_weight_buckets(&mut out, &signals, target_move, stop_move);
 
-    let suffix = format!("t{}_s{}_to{}", target_move, stop_move, timeout_ms);
+    random::print_control(&mut out, &signals, data, ts, target_move, stop_move);
+
+    let suffix = format!(
+        "t{}_s{}_to{}_d{}",
+        target_move, stop_move, timeout_ms, entry_delay_ms
+    );
 
     let csv_path = format!("signals_{}.csv", suffix);
     export_signals_csv(&csv_path, &signals).expect("[ERROR] csv export failed");
@@ -317,7 +333,6 @@ fn print_weight_buckets(out: &mut String, signals: &[Signal], target: f64, stop:
 
         writeln!(out, "\n--- weight [{}, {}) : {} signals ---", lo, hi, n).unwrap();
 
-        // Независимые пороги (порядок НЕ учитывается) — оставлены для справки.
         for t in mfe_thresholds {
             let c = stats.iter().filter(|s| s.mfe > t).count();
             writeln!(out, "MFE > {:>4}: {:>6.2}%", t, pct(c)).unwrap();
@@ -327,11 +342,10 @@ fn print_weight_buckets(out: &mut String, signals: &[Signal], target: f64, stop:
             writeln!(out, "MAE < {:>4}: {:>6.2}%", t, pct(c)).unwrap();
         }
 
-        // С учётом порядка: что случилось первым.
         let mut target_first = 0usize;
         let mut stop_first = 0usize;
         let mut neither = 0usize;
-        let mut neither_final_sum = 0.0;
+        let mut realized = 0.0_f64; // FIX: внутри бакета, обнуляется для каждого
         let mut t_times: Vec<f64> = Vec::new();
         let mut s_times: Vec<f64> = Vec::new();
 
@@ -340,25 +354,26 @@ fn print_weight_buckets(out: &mut String, signals: &[Signal], target: f64, stop:
                 (Some(t), Some(st)) if t < st => {
                     target_first += 1;
                     t_times.push(t as f64 / 1000.0);
+                    realized += s.first_target_return.unwrap_or(target); // FIX
                 }
                 (Some(t), None) => {
                     target_first += 1;
                     t_times.push(t as f64 / 1000.0);
+                    realized += s.first_target_return.unwrap_or(target); // FIX
                 }
                 (_, Some(st)) => {
                     stop_first += 1;
                     s_times.push(st as f64 / 1000.0);
+                    realized += s.first_stop_return.unwrap_or(-stop); // FIX
                 }
                 (None, None) => {
                     neither += 1;
-                    neither_final_sum += s.final_return;
+                    realized += s.final_return; // FIX
                 }
             }
         }
 
-        let expectancy = (target_first as f64 * target - stop_first as f64 * stop
-            + neither_final_sum)
-            / n as f64;
+        let expectancy = realized / n as f64;
 
         writeln!(out, "-- order-aware (target {} / stop {}) --", target, stop).unwrap();
         writeln!(out, "Target first: {:>6.2}%", pct(target_first)).unwrap();
@@ -371,7 +386,32 @@ fn print_weight_buckets(out: &mut String, signals: &[Signal], target: f64, stop:
             ExcursionSummary::median(&mut s_times)
         )
         .unwrap();
-        writeln!(out, "Expectancy per signal: {:.4}", expectancy).unwrap();
+
+        let mean_entry = stats.iter().map(|s| s.entry_price).sum::<f64>() / n as f64;
+        let usd_per_bps_round_trip = 2.0 * mean_entry / 10_000.0;
+
+        writeln!(out, "Expectancy gross:       {:.4} USD", expectancy).unwrap();
+        writeln!(
+            out,
+            "Expectancy gross:       {:.4} bps of price",
+            expectancy / mean_entry * 10_000.0
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "Break-even fee:         {:.4} bps/side",
+            expectancy / usd_per_bps_round_trip
+        )
+        .unwrap();
+        for fee in FEE_BPS_PER_SIDE {
+            writeln!(
+                out,
+                "Net expectancy @ {:>5.1} bps/side: {:>10.4} USD",
+                fee,
+                expectancy - fee * usd_per_bps_round_trip
+            )
+            .unwrap();
+        }
 
         let mut mfe_values: Vec<f64> = stats.iter().map(|s| s.mfe).collect();
         let mut mae_values: Vec<f64> = stats.iter().map(|s| s.mae).collect();
@@ -483,7 +523,13 @@ fn calculate_mfe_mae(
     target: f64,
     stop: f64,
 ) -> Option<ExcursionStats> {
-    let entry_row = data.get(signal.index)?;
+    // Вход на первой строке не раньше времени сигнала + задержка.
+    let sig_ts = ts[signal.index];
+    let entry_idx = ts
+        .partition_point(|&t| t < sig_ts + signal.delay_us)
+        .max(signal.index);
+
+    let entry_row = data.get(entry_idx)?;
     if entry_row.len() < 2 {
         return None;
     }
@@ -494,10 +540,9 @@ fn calculate_mfe_mae(
         Polarity::Flat => return None,
     };
 
-    let entry_ts = ts[signal.index];
+    let entry_ts = ts[entry_idx];
     let deadline = entry_ts + signal.timeout_us;
-
-    let start = signal.index + 1;
+    let start = entry_idx + 1;
     // ts отсортирован, поэтому конец окна ищем бинарным поиском.
     let end = ts.partition_point(|&t| t <= deadline);
 
@@ -515,6 +560,9 @@ fn calculate_mfe_mae(
 
     let mut first_target: Option<(usize, i64)> = None;
     let mut first_stop: Option<(usize, i64)> = None;
+
+    let mut target_ret: Option<f64> = None;
+    let mut stop_ret: Option<f64> = None;
 
     for i in start..end {
         let row = &data[i];
@@ -543,12 +591,13 @@ fn calculate_mfe_mae(
             mae_after = after;
         }
 
-        // Цель и стоп на одной строке взаимоисключающи, порядок однозначен.
         if first_target.is_none() && current_return >= target {
             first_target = Some((i, after));
+            target_ret = Some(current_return);
         }
         if first_stop.is_none() && -current_return >= stop {
             first_stop = Some((i, after));
+            stop_ret = Some(current_return);
         }
 
         final_return = current_return;
@@ -566,6 +615,8 @@ fn calculate_mfe_mae(
         mae_after_us: mae_after,
         final_return,
         final_index,
+        first_target_return: target_ret,
+        first_stop_return: stop_ret,
         first_target_index: first_target.map(|x| x.0),
         first_stop_index: first_stop.map(|x| x.0),
         first_target_after_us: first_target.map(|x| x.1),
@@ -575,18 +626,21 @@ fn calculate_mfe_mae(
 
 fn main() {
     let metrics_file_path: &str = "./metrics.log";
-    let target_move_arr: Vec<f64> = vec![5.0, 10.0, 15.0, 20.0];
-    let stop_move_arr: Vec<f64> = vec![5.0, 10.0, 15.0, 20.0];
-    let timeout_arr: Vec<u64> = vec![100, 200, 300, 400, 500];
-    let mut metrics_matrix: Vec<(Vec<f64>, Vec<f64>, Vec<u64>)> = Vec::new();
+    let target_move_arr: Vec<f64> = vec![50.0, 100.0];
+    let stop_move_arr: Vec<f64> = vec![50.0];
+    let timeout_arr: Vec<u64> = vec![5000, 30000];
+    let delay_arr: Vec<i64> = vec![50, 100, 200, 300];
+    let mut metrics_matrix: Vec<(Vec<f64>, Vec<f64>, Vec<u64>, Vec<i64>)> = Vec::new();
 
-    metrics_matrix.push((target_move_arr, stop_move_arr, timeout_arr));
+    metrics_matrix.push((target_move_arr, stop_move_arr, timeout_arr, delay_arr));
 
-    for (targets, stops, timeouts) in &metrics_matrix {
+    for (targets, stops, timeouts, delays) in &metrics_matrix {
         for target in targets {
             for stop in stops {
                 for timeout in timeouts {
-                    let metrics = analyse(metrics_file_path, *target, *stop, *timeout);
+                    for delay in delays {
+                        let metrics = analyse(metrics_file_path, *target, *stop, *timeout, *delay);
+                    }
                 }
             }
         }

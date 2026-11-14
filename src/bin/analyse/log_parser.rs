@@ -50,24 +50,28 @@ pub fn read_log_file(n: &str) -> io::Result<Log> {
     let mut ts_us = Vec::new();
     let mut data = Vec::new();
 
-    for row in contents.split(";\n") {
-        let r: Vec<&str> = row.split('|').collect();
-        if r.len() < 4 {
+    for line in contents.lines() {
+        let line = line.trim().trim_end_matches(';');
+        let r: Vec<&str> = line.split('|').collect();
+        if r.len() != 11 {
             continue;
         }
 
-        // Заголовок и битые строки отсеиваются здесь: timestamp в них не парсится.
         let Some(ts) = parse_ts(r[1]) else {
-            continue;
+            continue; // заголовок и битые строки
         };
 
-        let f_res: Vec<f64> = r[3..]
+        let parsed: Option<Vec<f64>> = r[4..]
             .iter()
-            .map(|v| v.trim().trim_end_matches(';').parse().unwrap_or(0.0))
+            .map(|v| v.trim().parse::<f64>().ok())
             .collect();
 
+        let Some(row) = parsed else {
+            continue; // битое число: пропускаем строку целиком
+        };
+
         ts_us.push(ts);
-        data.push(f_res);
+        data.push(row);
     }
 
     Ok(Log { ts_us, data })

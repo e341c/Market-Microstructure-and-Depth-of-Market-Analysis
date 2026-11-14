@@ -1,14 +1,13 @@
 mod auth;
-mod book;
+pub mod book;
 mod config;
 mod file;
-mod fix;
+pub mod fix;
 mod fixed;
 mod metrics;
 mod parser;
 mod simulator;
 mod timeutil;
-mod ws;
 
 use book::Book;
 use config::get_config;
@@ -25,6 +24,9 @@ use std::{
 
 use crate::{book::Top, timeutil::utc_timestamp};
 
+const OBI_SPAN: Duration = Duration::from_secs(1);
+const OFI_SPAN: Duration = Duration::from_millis(500);
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = get_config();
     let pem = std::fs::read_to_string(&cfg.pem_path)?;
@@ -40,8 +42,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_sent = Instant::now();
     let hb_interval = Duration::from_secs(cfg.heartbeat_secs.saturating_sub(5).max(1) as u64);
 
-    // ws::client::run_client(&cfg.binance_ws_url);
-
     // ofi_window: &mut VecDeque<(Instant, i128)>,
     // obi_window: &mut VecDeque<(Instant, i32)>,
 
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .append(true)
         .open("metrics.log")
         .expect("cannot create file");
-    let mut file = BufWriter::with_capacity(1 * 1024, file);
+    let mut file = BufWriter::with_capacity(64 * 1024, file);
 
     let mut ofi_window: VecDeque<(Instant, i128)> = VecDeque::new();
     let mut obi_window: VecDeque<(Instant, i32)> = VecDeque::new();
@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         obi_window.push_back((received, obi));
 
                         while let Some((timestamp, _)) = obi_window.front() {
-                            if received.duration_since(*timestamp) >= Duration::from_secs(1) {
+                            if received.duration_since(*timestamp) >= OBI_SPAN {
                                 obi_window.pop_front();
                             } else {
                                 break;
@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Удаляем события старше 500 ms
                         while let Some((timestamp, _)) = ofi_window.front() {
-                            if received.duration_since(*timestamp) >= Duration::from_millis(500) {
+                            if received.duration_since(*timestamp) >= OFI_SPAN {
                                 ofi_window.pop_front();
                             } else {
                                 break;

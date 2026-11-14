@@ -7,3 +7,4 @@ stunnel.conf
 /plot
 /tmp
 .DS_store
+profile.*

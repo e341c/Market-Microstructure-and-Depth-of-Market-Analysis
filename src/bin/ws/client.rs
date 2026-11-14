@@ -10,15 +10,15 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::book::{Book, Oba, Top};
-use crate::fixed::fmt_fixed;
-use crate::parser::parse_segmented_payload;
-use crate::timeutil::utc_timestamp;
-use crate::{file, metrics};
+use market_microstructure::book::{Book, Oba, Top};
+use market_microstructure::fixed::fmt_fixed;
+use market_microstructure::metrics;
+use market_microstructure::parser::parse_segmented_payload;
+use market_microstructure::timeutil::utc_timestamp;
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-pub fn run_client(url: &String) {
+pub fn run_client(url: &str) {
     // 1. Более надежный парсинг URL (выделяем host, port и path)
     let clean_url = url.replace("wss://", "");
 
