@@ -123,7 +123,7 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
         a[i].push(b[i]);
     }
 
-    println!("Создаем расширенную матрицу [A | B] {:?}", a);
+    // println!("Создаем расширенную матрицу [A | B] {:?}", a);
 
     // Прямой ход метода Гаусса с выбором главного элемента
     for i in 0..n {
