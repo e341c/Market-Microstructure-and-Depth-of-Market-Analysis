@@ -8,3 +8,4 @@ stunnel.conf
 /tmp
 .DS_store
 profile.*
+/data

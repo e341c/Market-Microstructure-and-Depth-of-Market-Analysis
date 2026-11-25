@@ -1,9 +1,11 @@
 mod auth;
 pub mod book;
 mod config;
+mod fetchdata;
 mod file;
 pub mod fix;
 mod fixed;
+mod kline;
 mod metrics;
 mod parser;
 mod simulator;
