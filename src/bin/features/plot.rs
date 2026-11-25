@@ -23,7 +23,7 @@ pub fn plot_features_png(
     signals: &[Option<u8>],
     start: usize,
     end: usize,
-    recorded_moves: &[(usize, f64, f64, f64)],
+    recorded_moves: &[(usize, &str, f64, f64, f64)],
 ) -> Result<(), Box<dyn Error>> {
     if rows.len() != signals.len() {
         return Err(io::Error::new(
@@ -289,16 +289,22 @@ pub fn plot_features_png(
         let first_visible_index = selected.first().expect("validated non-empty range").index;
         let last_visible_index = selected.last().expect("validated non-empty range").index;
         chart
-            .draw_series(
-                recorded_moves
-                    .iter()
-                    .filter_map(|&(index, _previous, current, _change_pct)| {
-                        (index >= first_visible_index && index <= last_visible_index)
-                            .then_some((index as i32, current))
-                    })
-                    .map(|point| Circle::new(point, 8, ORANGE.filled())),
-            )?
-            .label("SMA difference increase >= 100%")
+            .draw_series(recorded_moves.iter().filter_map(
+                |&(index, direction, _previous, current, _change_pct)| {
+                    if index < first_visible_index || index > last_visible_index {
+                        return None;
+                    }
+
+                    let color = match direction {
+                        "down->up" => GREEN,
+                        "up->down" => RED,
+                        _ => return None,
+                    };
+
+                    Some(Circle::new((index as i32, current), 4, color.filled()))
+                },
+            ))?
+            .label("SMA difference reversal")
             .legend(|(x, y)| Circle::new((x + 11, y), 7, ORANGE.filled()));
 
         chart.draw_series(std::iter::once(PathElement::new(
